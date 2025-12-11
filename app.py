@@ -4,11 +4,16 @@ import math
 import zipfile
 import io
 import os
+import time
+import json
+from datetime import datetime
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QColorDialog, 
                              QToolBar, QFileDialog, QGraphicsView, QGraphicsScene, 
                              QGraphicsPixmapItem, QMessageBox, QDockWidget, QListWidget, 
                              QListWidgetItem, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QLabel, QComboBox, QSlider, QInputDialog) 
+                             QPushButton, QLabel, QComboBox, QSlider, QInputDialog,
+                             QStackedWidget, QDialog, QFormLayout, QSpinBox, QGridLayout) 
 from PyQt6.QtGui import (QPixmap, QPainter, QPen, QColor, QAction, QTabletEvent, 
                          QPointingDevice, QBrush, QIcon, QImage, QPainterPath,
                          QLinearGradient, QRadialGradient, QPolygonF, 
@@ -17,20 +22,23 @@ from PyQt6.QtCore import Qt, QSize, QRect, QPoint, QPointF
 import PyQt6.QtWidgets as QtWidgets
 import PyQt6.QtCore as db 
 
-# --- TENTA LIGAR O MOTOR C++ ---
+# --- CONFIGURAÇÃO DO MOTOR C++ ---
 try:
     import motor_cpp
     print("============================================")
-    print("   🚀 SUCESSO: MOTOR C++ CARREGADO!         ")
+    print("   🚀 SUCESSO: MOTOR LIBMYPAINT CARREGADO!  ")
     print("============================================")
     MOTOR_C_ATIVO = True
-except ImportError:
+except ImportError as e:
     print("============================================")
-    print("   🐢 AVISO: MOTOR C++ NÃO ENCONTRADO       ")
+    print(f"   🐢 AVISO: MOTOR C++ FALHOU: {e}         ")
     print("============================================")
     MOTOR_C_ATIVO = False
 
-# --- 1. GERENCIADOR DE ESTILOS ---
+# ============================================================================
+# 1. CLASSES UTILITÁRIAS E DE DADOS
+# ============================================================================
+
 class GerenciadorPinceis:
     def __init__(self):
         self.estilos = {
@@ -55,7 +63,7 @@ class GerenciadorPinceis:
                 "jitter_angle": 0, "jitter_size": 0, "mistura_padrao": 0
             },
             "Borracha Limpa-Tipos (C++)": { 
-                "dinamica_tamanho": False, "dinamica_alpha": True, "texturizado": True, "textura": self.gerar_textura_forte(), # Textura mais forte pra apagar
+                "dinamica_tamanho": False, "dinamica_alpha": True, "texturizado": True, "textura": self.gerar_textura_forte(),
                 "jitter_angle": 360, "jitter_size": 0.2, "mistura_padrao": 0
             }
         }
@@ -67,7 +75,7 @@ class GerenciadorPinceis:
         p = QPainter(img)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(0, 0, 0, 20)) # Opacidade baixa (pintura suave)
+        p.setBrush(QColor(0, 0, 0, 20))
         p.drawEllipse(2, 2, 60, 60)
         for _ in range(400):
             x = random.randint(0, 64); y = random.randint(0, 64)
@@ -78,19 +86,19 @@ class GerenciadorPinceis:
         p.end()
         return img
 
-    def gerar_textura_forte(self): # Nova textura para borracha
+    def gerar_textura_forte(self): 
         img = QPixmap(64, 64)
         img.fill(Qt.GlobalColor.transparent)
         p = QPainter(img)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(0, 0, 0, 150)) # Opacidade ALTA (para apagar bem)
+        p.setBrush(QColor(0, 0, 0, 150))
         p.drawEllipse(2, 2, 60, 60)
         for _ in range(600):
             x = random.randint(0, 64); y = random.randint(0, 64)
             dx = x - 32; dy = y - 32
             if dx*dx + dy*dy < 30*30:
-                p.setPen(QColor(0, 0, 0, 255)) # Pontos pretos sólidos
+                p.setPen(QColor(0, 0, 0, 255)) 
                 p.drawPoint(x, y)
         p.end()
         return img
@@ -144,7 +152,28 @@ class GerenciadorPinceis:
         if config["textura"]: return config["textura"]
         return self.gerar_textura_padrao() 
 
-# --- 2. CANVAS VIEW ---
+class DadosCamada:
+    def __init__(self, nome, w, h, z):
+        self.nome = nome; self.visivel = True; self.trancada = False
+        self.pixmap = QPixmap(w, h); self.pixmap.fill(Qt.GlobalColor.transparent)
+        self.item = QGraphicsPixmapItem(self.pixmap); self.item.setZValue(z)
+
+class WidgetItemCamada(QWidget):
+    def __init__(self, texto, trancada, callback):
+        super().__init__()
+        l = QHBoxLayout(self); l.setContentsMargins(2,2,2,2)
+        self.btn = QPushButton("👁️"); self.btn.setCheckable(True); self.btn.setChecked(True)
+        self.btn.clicked.connect(callback); self.btn.setFixedSize(30,30)
+        self.btn.setStyleSheet("border:none; font-size:16px;")
+        l.addWidget(self.btn); lbl = QLabel(texto); lbl.setStyleSheet("color:#DDD; font-weight:bold")
+        l.addWidget(lbl)
+        if trancada: l.addWidget(QLabel("🔒"))
+        l.addStretch()
+
+# ============================================================================
+# 2. COMPONENTES VISUAIS (CANVAS, CORES, DIALOGOS)
+# ============================================================================
+
 class CanvasView(QGraphicsView):
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
@@ -184,7 +213,6 @@ class CanvasView(QGraphicsView):
         if self.parent(): self.parent().tratar_mouse_release(event)
         super().mouseReleaseEvent(event)
 
-# --- 3. SELETOR DE CORES 8-BIT ---
 class SeletorCoresAvancado8Bit(QWidget):
     corChanged = db.pyqtSignal(QColor)
     def __init__(self, parent=None):
@@ -240,38 +268,124 @@ class SeletorCoresAvancado8Bit(QWidget):
         self.cor_atual = QColor.fromHsvF(self.hue, self.sat, self.val)
         self.corChanged.emit(self.cor_atual); self.update()
 
-# --- 4. ESTRUTURA DE DADOS ---
-class DadosCamada:
-    def __init__(self, nome, w, h, z):
-        self.nome = nome; self.visivel = True; self.trancada = False
-        self.pixmap = QPixmap(w, h); self.pixmap.fill(Qt.GlobalColor.transparent)
-        self.item = QGraphicsPixmapItem(self.pixmap); self.item.setZValue(z)
-
-class WidgetItemCamada(QWidget):
-    def __init__(self, texto, trancada, callback):
-        super().__init__()
-        l = QHBoxLayout(self); l.setContentsMargins(2,2,2,2)
-        self.btn = QPushButton("👁️"); self.btn.setCheckable(True); self.btn.setChecked(True)
-        self.btn.clicked.connect(callback); self.btn.setFixedSize(30,30)
-        self.btn.setStyleSheet("border:none; font-size:16px;")
-        l.addWidget(self.btn); lbl = QLabel(texto); lbl.setStyleSheet("color:#DDD; font-weight:bold")
-        l.addWidget(lbl)
-        if trancada: l.addWidget(QLabel("🔒"))
-        l.addStretch()
-
-# --- 5. JANELA PRINCIPAL ---
-class MeuDesenhoPro(QMainWindow):
-    def __init__(self):
-        super().__init__()
+# --- NOVO: DIÁLOGO DE CRIAÇÃO DE ARQUIVO ---
+class DialogoNovoArquivo(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nova Arte")
+        self.setFixedSize(300, 200)
+        self.setStyleSheet("background-color: #404040; color: white;")
         
+        layout = QFormLayout(self)
+        
+        self.inp_largura = QSpinBox()
+        self.inp_largura.setRange(64, 8000); self.inp_largura.setValue(2000)
+        self.inp_largura.setSuffix(" px")
+        
+        self.inp_altura = QSpinBox()
+        self.inp_altura.setRange(64, 8000); self.inp_altura.setValue(2000)
+        self.inp_altura.setSuffix(" px")
+        
+        self.inp_nome = QtWidgets.QLineEdit("Sem Titulo")
+        
+        layout.addRow("Nome do Projeto:", self.inp_nome)
+        layout.addRow("Largura:", self.inp_largura)
+        layout.addRow("Altura:", self.inp_altura)
+        
+        btn_criar = QPushButton("CRIAR TELA")
+        btn_criar.setStyleSheet("background-color: #007ACC; font-weight: bold; padding: 10px; border-radius: 5px;")
+        btn_criar.clicked.connect(self.accept)
+        layout.addWidget(btn_criar)
+
+    def get_dados(self):
+        return self.inp_nome.text(), self.inp_largura.value(), self.inp_altura.value()
+
+# ============================================================================
+# 3. TELAS DO SISTEMA (GALERIA E EDITOR)
+# ============================================================================
+
+# --- TELA 1: A GALERIA PROCREATE-STYLE ---
+class TelaGaleria(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main = main_window
+        self.caminho_galeria = os.path.join(os.path.expanduser("~"), "Desktop", "Galeria_Artes")
+        
+        if not os.path.exists(self.caminho_galeria):
+            os.makedirs(self.caminho_galeria)
+
+        layout = QVBoxLayout(self)
+        
+        # Cabeçalho
+        topo = QHBoxLayout()
+        lbl = QLabel("Minha Galeria"); lbl.setStyleSheet("font-size: 24px; font-weight: bold; color: #DDD;")
+        topo.addWidget(lbl)
+        topo.addStretch()
+        
+        # Botão NOVO (+)
+        btn_novo = QPushButton(" + Nova Arte ")
+        btn_novo.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_novo.setStyleSheet("""
+            QPushButton { background-color: #007ACC; color: white; font-size: 16px; font-weight: bold; border-radius: 8px; padding: 8px 15px; }
+            QPushButton:hover { background-color: #0099FF; }
+        """)
+        btn_novo.clicked.connect(self.criar_novo)
+        topo.addWidget(btn_novo)
+        layout.addLayout(topo)
+
+        # Grid de Artes
+        self.lista_artes = QListWidget()
+        self.lista_artes.setViewMode(QListWidget.ViewMode.IconMode)
+        self.lista_artes.setIconSize(QSize(180, 180))
+        self.lista_artes.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.lista_artes.setSpacing(20)
+        self.lista_artes.setStyleSheet("QListWidget { background-color: #303030; border: none; } QListWidget::item { color: white; } QListWidget::item:hover { background-color: #505050; border-radius: 10px; }")
+        self.lista_artes.itemDoubleClicked.connect(self.abrir_arte)
+        layout.addWidget(self.lista_artes)
+        
+        self.carregar_galeria()
+
+    def carregar_galeria(self):
+        self.lista_artes.clear()
+        arquivos = [f for f in os.listdir(self.caminho_galeria) if f.endswith('.png')]
+        arquivos.sort(key=lambda x: os.path.getmtime(os.path.join(self.caminho_galeria, x)), reverse=True)
+        
+        for arq in arquivos:
+            caminho_completo = os.path.join(self.caminho_galeria, arq)
+            icon = QIcon(caminho_completo)
+            item = QListWidgetItem(arq.replace(".png", ""))
+            item.setIcon(icon)
+            item.setData(Qt.ItemDataRole.UserRole, caminho_completo)
+            self.lista_artes.addItem(item)
+
+    def criar_novo(self):
+        diag = DialogoNovoArquivo(self)
+        if diag.exec():
+            nome, w, h = diag.get_dados()
+            # Manda criar o arquivo no Editor e muda a tela
+            self.main.abrir_editor(w, h, nome)
+
+    def abrir_arte(self, item):
+        caminho = item.data(Qt.ItemDataRole.UserRole)
+        self.main.abrir_editor_com_arquivo(caminho)
+
+# --- TELA 2: O EDITOR DE DESENHO (Antigo MainWindow) ---
+class TelaEditor(QMainWindow):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_app = main_window # Referência ao Gerente
+        self.caminho_atual = None
+        
+        # --- Configuração do Motor C++ ---
         if MOTOR_C_ATIVO:
-            self.setWindowTitle("SamK Art Studio - 🚀 MOTOR V8 (C++) ATIVADO!")
+            self.motor_fisico = motor_cpp.MotorMyPaint()
+            self.tempo_anterior = time.time()
         else:
-            self.setWindowTitle("SamK Art Studio - 🐢 MODO PYTHON (LENTO)")
+            self.motor_fisico = None
             
-        self.setGeometry(100, 100, 1400, 800)
-        self.setStyleSheet("QMainWindow { background-color: #404040; } QMenuBar { background-color: #303030; color: white; } QMenuBar::item:selected { background-color: #505050; } QMenu { background-color: #303030; color: white; border: 1px solid #555; } QMenu::item:selected { background-color: #007ACC; } QToolBar { border: none; } QDockWidget { color: white; font-weight: bold; background-color: #353535; } QListWidget { background-color: #353535; } QLabel { color: white; }")
+        self.setStyleSheet("QMainWindow { background-color: #404040; } QDockWidget { color: white; font-weight: bold; background-color: #353535; } QListWidget { background-color: #353535; } QLabel { color: white; }")
         
+        # Dados Iniciais
         self.motor = GerenciadorPinceis()
         self.tam_base = 30; self.opac_global = 1.0; self.cor_pincel = QColor("black")
         self.fator_mistura = 0.0
@@ -288,7 +402,7 @@ class MeuDesenhoPro(QMainWindow):
         }
         self.blend_atual = self.modos_blend["Normal"]
 
-        self.scene = QGraphicsScene(0, 0, 2000, 2000)
+        self.scene = QGraphicsScene()
         self.scene.setBackgroundBrush(QColor("#202020"))
         
         self.view = CanvasView(self.scene, self)
@@ -296,14 +410,46 @@ class MeuDesenhoPro(QMainWindow):
 
         self.setup_docks(); self.setup_toolbar(); self.setup_menus()
         
-        bg = DadosCamada("Papel", 2000, 2000, 0); bg.pixmap.fill(QColor("#F5F5F0"))
-        bg.item.setPixmap(bg.pixmap); self.scene.addItem(bg.item); self.camadas.append(bg)
-        self.nova_camada(); self.idx_ativa = 1; self.atualizar_lista_camadas()
-
+        # Atalho Tab
         self.sh_tab = QShortcut(QKeySequence("Tab"), self)
         self.sh_tab.activated.connect(self.toggle_zen_mode)
 
-    # --- PROCESSAMENTO DO DESENHO (CORRIGIDO) ---
+    # --- INICIALIZAÇÃO DA TELA (CHAMADO PELA GALERIA) ---
+    def novo_projeto(self, w, h, nome="Sem Titulo"):
+        self.scene.clear(); self.camadas = []; self.historico = []
+        self.scene.setSceneRect(0, 0, w, h)
+        
+        # Define caminho de salvamento automático
+        safe_name = "".join([c for c in nome if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+        self.caminho_atual = os.path.join(self.main_app.galeria.caminho_galeria, f"{safe_name}.png")
+        if os.path.exists(self.caminho_atual): # Evita sobrescrever
+            self.caminho_atual = os.path.join(self.main_app.galeria.caminho_galeria, f"{safe_name}_{int(time.time())}.png")
+
+        bg = DadosCamada("Papel", w, h, 0); bg.pixmap.fill(QColor("#F5F5F0"))
+        bg.item.setPixmap(bg.pixmap); self.scene.addItem(bg.item); self.camadas.append(bg)
+        self.nova_camada(); self.idx_ativa = 1; self.atualizar_lista_camadas()
+        
+        # Centraliza a vista
+        self.view.resetTransform()
+        self.view.centerOn(w/2, h/2)
+        self.view.scale(0.8, 0.8) # Zoom out inicial para ver tudo
+
+    def carregar_projeto(self, caminho):
+        self.caminho_atual = caminho
+        pix = QPixmap(caminho)
+        w, h = pix.width(), pix.height()
+        
+        self.scene.clear(); self.camadas = []; self.historico = []
+        self.scene.setSceneRect(0, 0, w, h)
+        
+        bg = DadosCamada("Fundo (Imagem)", w, h, 0); bg.pixmap = pix
+        bg.item.setPixmap(bg.pixmap); self.scene.addItem(bg.item); self.camadas.append(bg)
+        
+        self.nova_camada(); self.idx_ativa = 1; self.atualizar_lista_camadas()
+        self.view.resetTransform(); self.view.centerOn(w/2, h/2); self.view.scale(0.8, 0.8)
+
+    # --- LÓGICA DE DESENHO E FERRAMENTAS ---
+    # (Mantida idêntica à versão anterior, apenas indentada)
     def processar_desenho(self, pos, pressao, eraser):
         if self.idx_ativa >= len(self.camadas): return
         cam = self.camadas[self.idx_ativa]
@@ -311,20 +457,11 @@ class MeuDesenhoPro(QMainWindow):
 
         conf = self.motor.pegar_config()
         tam = self.tam_base
-        
-        # --- LÓGICA DE BORRACHA CORRIGIDA ---
-        # Se a ferramenta é borracha ou a caneta está invertida
         eh_borracha = (self.ferramenta == "borracha") or eraser
         
         if eh_borracha:
-            if conf["texturizado"]:
-                # Borracha com textura (suave)
-                modo = QPainter.CompositionMode.CompositionMode_DestinationOut
-            else:
-                # Borracha dura (padrão)
-                modo = QPainter.CompositionMode.CompositionMode_Clear
+            modo = QPainter.CompositionMode.CompositionMode_DestinationOut if conf.get("texturizado") else QPainter.CompositionMode.CompositionMode_Clear
         else:
-            # Pincel normal
             modo = self.blend_atual
         
         p1, p2 = self.ultimo_ponto, pos
@@ -335,7 +472,7 @@ class MeuDesenhoPro(QMainWindow):
         p.setCompositionMode(modo)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # MISTURA (Smudge) - Não mistura se estiver apagando
+        # MISTURA
         cor_uso = self.cor_pincel
         if self.fator_mistura > 0 and self.cache_leitura and not eh_borracha:
             x_read = max(0, min(self.cache_leitura.width()-1, int(p1.x())))
@@ -346,40 +483,38 @@ class MeuDesenhoPro(QMainWindow):
             b = int(self.cor_pincel.blue() * (1 - self.fator_mistura) + cor_fundo.blue() * self.fator_mistura)
             cor_uso = QColor(r, g, b, self.cor_pincel.alpha())
 
-        # MODO PYTHON (SIMPLES)
-        if not conf["texturizado"] or (eh_borracha and not conf["texturizado"]):
+        eh_mypaint = conf.get("eh_mypaint_oficial", False)
+        
+        if (not conf.get("texturizado") and not eh_mypaint) or (eh_borracha and not conf.get("texturizado")) or not MOTOR_C_ATIVO:
             tam_final = max(1, tam * pressao) if conf["dinamica_tamanho"] else tam
             alpha_final = pressao if conf["dinamica_alpha"] else 1.0
             p.setOpacity(alpha_final * self.opac_global)
             pen = QPen(Qt.GlobalColor.transparent if eh_borracha else cor_uso, tam_final, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             p.setPen(pen); p.drawLine(p1, p2)
         
-        # MODO C++ (ACELERADO - Pincel ou Borracha Texturizada)
-        elif MOTOR_C_ATIVO and conf["texturizado"]:
-            pontos = motor_cpp.calcular_trajeto(
-                p1.x(), p1.y(), p2.x(), p2.y(),
-                self.resto_dist, max(1, tam * 0.15), tam, pressao,
-                conf["dinamica_tamanho"], conf["dinamica_alpha"],
-                conf.get("jitter_angle", 0), conf.get("jitter_size", 0)
-            )
+        elif MOTOR_C_ATIVO and (conf.get("texturizado") or eh_mypaint):
+            agora = time.time()
+            dt = agora - self.tempo_anterior
+            self.tempo_anterior = agora
             
-            if pontos:
-                ultimo = pontos.pop()
-                self.resto_dist = ultimo[1]
+            if eh_mypaint and "dados_mypaint" in conf:
+                settings = conf["dados_mypaint"].get("settings", {})
+                for nome_setting, valor in settings.items():
+                    v_final = valor.get("base_value", 0.0)
+                    self.motor_fisico.set_parametro_por_nome(nome_setting, float(v_final))
+            else:
+                self.motor_fisico.set_config(0, float(tam) * 0.1) 
+                self.motor_fisico.set_config(1, float(self.opac_global))
 
+            dabs = self.motor_fisico.atualizar_traco(pos.x(), pos.y(), pressao, dt)
             tex = self.motor.pegar_textura_atual()
-            for pt in pontos:
-                p.setOpacity(pt[3] * self.opac_global)
-                tam_i = int(pt[2]) if int(pt[2]) > 0 else 1
-                tex_scaled = tex.scaled(tam_i, tam_i, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                if pt[4] > 0:
-                    p.save(); p.translate(pt[0], pt[1]); p.rotate(pt[4])
-                    p.drawPixmap(int(-tam_i/2), int(-tam_i/2), tex_scaled); p.restore()
-                else:
-                    p.drawPixmap(int(pt[0] - tam_i/2), int(pt[1] - tam_i/2), tex_scaled)
+            for x, y, raio, opac in dabs:
+                diametro = raio * 2
+                if diametro < 0.5: continue
+                p.setOpacity(opac)
+                tex_scaled = tex.scaled(int(diametro), int(diametro), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                p.drawPixmap(int(x - diametro/2), int(y - diametro/2), tex_scaled)
         
-        else: pass
-
         p.end(); cam.item.setPixmap(cam.pixmap); self.ultimo_ponto = pos
 
     def tabletEvent(self, e: QTabletEvent):
@@ -404,15 +539,16 @@ class MeuDesenhoPro(QMainWindow):
         if e.button() == Qt.MouseButton.LeftButton: self.tratar_fim_traco()
 
     def tratar_inicio_traco(self, pos):
-        self.ultimo_ponto = pos
-        self.resto_dist = 0
+        self.ultimo_ponto = pos; self.resto_dist = 0
+        if MOTOR_C_ATIVO and self.motor_fisico:
+            self.tempo_anterior = time.time(); self.motor_fisico.reset()
         if self.idx_ativa < len(self.camadas):
             self.cache_leitura = self.camadas[self.idx_ativa].pixmap.toImage()
 
     def tratar_fim_traco(self):
-        self.ultimo_ponto = None
-        self.cache_leitura = None 
+        self.ultimo_ponto = None; self.cache_leitura = None 
 
+    # --- UI SETUP ---
     def setup_docks(self):
         self.dk_cor = QDockWidget("Cores", self); w = QWidget(); l = QVBoxLayout(w); l.setContentsMargins(0,0,0,0)
         self.sel_cor = SeletorCoresAvancado8Bit(); self.sel_cor.corChanged.connect(lambda c: setattr(self, 'cor_pincel', c))
@@ -435,6 +571,12 @@ class MeuDesenhoPro(QMainWindow):
 
     def setup_toolbar(self):
         tb = self.addToolBar("Tools")
+        # Botão de Voltar para a Galeria
+        btn_home = QAction("🏠 Galeria", self)
+        btn_home.triggered.connect(self.voltar_para_galeria)
+        tb.addAction(btn_home)
+        tb.addSeparator()
+        
         tb.addWidget(QLabel("📏")); sl_tam = QSlider(Qt.Orientation.Horizontal); sl_tam.setRange(1, 300); sl_tam.setValue(30)
         sl_tam.valueChanged.connect(lambda v: setattr(self, 'tam_base', v)); tb.addWidget(sl_tam)
         tb.addWidget(QLabel("💧")); sl_op = QSlider(Qt.Orientation.Horizontal); sl_op.setRange(0, 100); sl_op.setValue(100)
@@ -444,12 +586,29 @@ class MeuDesenhoPro(QMainWindow):
         cb_blend = QComboBox(); cb_blend.addItems(self.modos_blend.keys())
         cb_blend.currentTextChanged.connect(lambda t: setattr(self, 'blend_atual', self.modos_blend[t]))
         tb.addWidget(cb_blend)
-        tb.addAction("💾", self.salvar); tb.addAction("📂", self.abrir); tb.addAction("🧼", lambda: setattr(self, 'ferramenta', 'borracha'))
+        tb.addAction("💾", self.salvar_rapido); tb.addAction("📂", self.abrir); tb.addAction("🧼", lambda: setattr(self, 'ferramenta', 'borracha'))
 
     def setup_menus(self):
         m = self.menuBar().addMenu("Exibir")
         m.addAction(self.dk_cor.toggleViewAction()); m.addAction(self.dk_brush.toggleViewAction())
         m.addAction(self.dk_layer.toggleViewAction()); m.addAction("Tela Cheia (Tab)", self.toggle_zen_mode)
+
+    # --- FUNÇÕES DE CONTROLE ---
+    def voltar_para_galeria(self):
+        self.salvar_rapido(silencioso=True)
+        self.main_app.ir_para_galeria()
+
+    def salvar_rapido(self, silencioso=False):
+        if self.caminho_atual:
+            img = QPixmap(self.scene.width(), self.scene.height())
+            img.fill(Qt.GlobalColor.transparent); p = QPainter(img)
+            # Fundo Branco Padrão se não tiver
+            p.fillRect(img.rect(), Qt.GlobalColor.white)
+            for c in self.camadas: 
+                if c.visivel: 
+                    opt = QtWidgets.QStyleOptionGraphicsItem(); c.item.paint(p, opt, None)
+            p.end(); img.save(self.caminho_atual)
+            if not silencioso: QMessageBox.information(self, "Salvo", "Arte salva na Galeria!")
 
     def toggle_zen_mode(self):
         self.modo_zen = not self.modo_zen
@@ -459,7 +618,7 @@ class MeuDesenhoPro(QMainWindow):
             self.showNormal(); self.menuBar().show(); self.dk_cor.show(); self.dk_brush.show(); self.dk_layer.show()
 
     def nova_camada(self):
-        idx = len(self.camadas); c = DadosCamada(f"Camada {idx}", 2000, 2000, idx)
+        idx = len(self.camadas); c = DadosCamada(f"Camada {idx}", int(self.scene.width()), int(self.scene.height()), idx)
         self.scene.addItem(c.item); self.camadas.append(c); self.idx_ativa = idx; self.atualizar_lista_camadas()
 
     def del_camada(self):
@@ -482,18 +641,13 @@ class MeuDesenhoPro(QMainWindow):
         self.camadas[idx].visivel = not self.camadas[idx].visivel
         self.camadas[idx].item.setVisible(self.camadas[idx].visivel)
 
-    # --- CORREÇÃO: DETECTA SE O NOME TEM "BORRACHA" ---
     def mudar_pincel(self, nome): 
         self.motor.pincel_atual = nome
-        if "Borracha" in nome:
-            self.ferramenta = "borracha"
-        else:
-            self.ferramenta = "pincel"
-            
+        if "Borracha" in nome: self.ferramenta = "borracha"
+        else: self.ferramenta = "pincel"
         conf = self.motor.pegar_config()
-        mix = conf.get("mistura_padrao", 0)
-        self.fator_mistura = mix / 100.0
-        self.sl_mix.setValue(mix)
+        self.fator_mistura = conf.get("mistura_padrao", 0) / 100.0
+        self.sl_mix.setValue(conf.get("mistura_padrao", 0))
 
     def atualizar_lista_pinceis(self):
         self.lst_brush.clear()
@@ -502,33 +656,44 @@ class MeuDesenhoPro(QMainWindow):
             it.setIcon(icon); self.lst_brush.addItem(it)
 
     def importar_brush(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Importar", "", "Img/Krita (*.png *.jpg *.bundle)")
+        path, _ = QFileDialog.getOpenFileName(self, "Importar Pincel", "", "MyPaint Brush (*.myb);;Imagens (*.png *.jpg *.bundle)")
         if not path: return
-        if path.endswith(".bundle"):
+        nome_arquivo = os.path.basename(path)
+        if path.endswith(".myb"):
+            try:
+                with open(path, 'r') as f: dados_json = json.load(f)
+                self.motor.criar_novo_pincel_customizado(nome_arquivo, None)
+                config = self.motor.estilos[self.motor.pincel_atual]
+                config["dados_mypaint"] = dados_json; config["eh_mypaint_oficial"] = True
+                QMessageBox.information(self, "Sucesso", f"Pincel '{nome_arquivo}' importado!")
+                self.atualizar_lista_pinceis()
+            except Exception as e: QMessageBox.warning(self, "Erro", f"Erro ao ler .myb: {e}")
+        elif path.endswith(".bundle"):
             with zipfile.ZipFile(path, 'r') as z:
                 for f in z.namelist():
                     if f.endswith(('.png','.jpg')) and "preview" not in f:
                         pix = QPixmap(); pix.loadFromData(z.read(f))
                         if not pix.isNull(): self.motor.criar_novo_pincel_customizado(os.path.basename(f), pix)
+            self.atualizar_lista_pinceis()
         else:
             pix = QPixmap(path)
-            if not pix.isNull(): self.motor.criar_novo_pincel_customizado("Custom", pix)
-        self.atualizar_lista_pinceis()
+            if not pix.isNull(): 
+                self.motor.criar_novo_pincel_customizado("Custom Image", pix)
+                self.atualizar_lista_pinceis()
 
     def salvar(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Salvar", "", "PNG (*.png)")
+        # Salvar Como (Exportar)
+        path, _ = QFileDialog.getSaveFileName(self, "Exportar Imagem", "", "PNG (*.png)")
         if path:
-            img = QPixmap(2000, 2000); img.fill(Qt.GlobalColor.transparent); p = QPainter(img)
+            img = QPixmap(self.scene.width(), self.scene.height())
+            img.fill(Qt.GlobalColor.transparent); p = QPainter(img); p.fillRect(img.rect(), Qt.GlobalColor.white)
             for c in self.camadas: 
-                if c.visivel: 
-                    opt = QtWidgets.QStyleOptionGraphicsItem(); c.item.paint(p, opt, None)
+                if c.visivel: opt = QtWidgets.QStyleOptionGraphicsItem(); c.item.paint(p, opt, None)
             p.end(); img.save(path)
 
     def abrir(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Abrir", "", "Img (*.png *.jpg)")
-        if path: 
-            pix = QPixmap(path).scaled(2000, 2000, Qt.AspectRatioMode.KeepAspectRatio)
-            self.camadas[self.idx_ativa].pixmap = pix; self.camadas[self.idx_ativa].item.setPixmap(pix)
+        path, _ = QFileDialog.getOpenFileName(self, "Abrir Imagem", "", "Img (*.png *.jpg)")
+        if path: self.carregar_projeto(path)
 
     def salvar_undo(self):
         if len(self.historico) > 10: self.historico.pop(0)
@@ -543,8 +708,45 @@ class MeuDesenhoPro(QMainWindow):
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier and e.key() == Qt.Key.Key_Z: 
             self.desfazer()
         elif e.key() == Qt.Key.Key_R: 
-            self.view.resetTransform(); self.view.scale(1.0, 1.0)
+            self.view.resetTransform(); self.view.scale(0.8, 0.8)
+
+# ============================================================================
+# 4. JANELA GERENTE (CONTROLA TUDO)
+# ============================================================================
+class JanelaPrincipal(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("SamK Art Studio Pro")
+        self.setGeometry(100, 100, 1400, 800)
+        self.setStyleSheet("background-color: #252525;")
+
+        # StackedWidget: Permite trocar de telas (Galeria <-> Editor)
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        # Cria as duas telas
+        self.galeria = TelaGaleria(self)
+        self.editor = TelaEditor(self)
+
+        self.stack.addWidget(self.galeria) # Index 0
+        self.stack.addWidget(self.editor)  # Index 1
+
+        self.ir_para_galeria()
+
+    def ir_para_galeria(self):
+        self.galeria.carregar_galeria() # Recarrega as imagens salvas
+        self.stack.setCurrentIndex(0)
+
+    def abrir_editor(self, w, h, nome):
+        self.editor.novo_projeto(w, h, nome)
+        self.stack.setCurrentIndex(1)
+
+    def abrir_editor_com_arquivo(self, caminho):
+        self.editor.carregar_projeto(caminho)
+        self.stack.setCurrentIndex(1)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    win = MeuDesenhoPro(); win.show(); app.exec()
+    win = JanelaPrincipal()
+    win.show()
+    app.exec()
