@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=SamK Studio
+Comment=Meu aplicativo de desenho
+# O comando abaixo roda o python no seu arquivo app.py
+Exec=python3 "/home/samk/Desktop/Meu Desenho/app.py"
+# Define a pasta de trabalho para evitar erros de importação
+Path=/home/samk/Desktop/Meu Desenho/
+Terminal=false
+Categories=Graphics;
